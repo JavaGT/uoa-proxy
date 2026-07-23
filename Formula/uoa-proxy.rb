@@ -1,7 +1,7 @@
 class UoaProxy < Formula
   desc "Always-on University of Auckland Fortinet VPN control"
-  homepage "https://github.com/YOUR_GITHUB_USER/uoa-proxy"
-  url "https://github.com/YOUR_GITHUB_USER/uoa-proxy/archive/refs/tags/v1.0.0.tar.gz"
+  homepage "https://github.com/JavaGT/uoa-proxy"
+  url "https://github.com/JavaGT/uoa-proxy/archive/refs/tags/v1.0.0.tar.gz"
   version "1.0.0"
   license "MIT"
 

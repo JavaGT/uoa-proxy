@@ -24,12 +24,11 @@ Always-on VPN control for the University of Auckland Fortinet gateway (`openconn
 
 ### Homebrew
 
-After replacing `YOUR_GITHUB_USER` in `Formula/uoa-proxy.rb` with the GitHub
-account that owns this repository, put that formula in a tap repository (for
-example `YOUR_GITHUB_USER/homebrew-tap`) and install it with:
+The formula is maintained in the `JavaGT/homebrew-tap` repository. Install it
+with:
 
 ```bash
-brew install YOUR_GITHUB_USER/tap/uoa-proxy
+brew install JavaGT/tap/uoa-proxy
 brew services start uoa-proxy
 uoa-proxy install-sudo   # once per Mac; asks for the Mac administrator password
 ```
