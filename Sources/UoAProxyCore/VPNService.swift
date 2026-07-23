@@ -13,6 +13,7 @@ public actor VPNService {
     private var desiredConnected = false
     private var currentAttemptIsReconnect = false
     private var reconnectTask: Task<Void, Never>?
+    private var reconnectID: UUID?
 
     private var cachedSudoOK: Bool?
     private var cachedSudoOKAt: Date = .distantPast
@@ -50,6 +51,7 @@ public actor VPNService {
         desiredConnected = true
         reconnectTask?.cancel()
         reconnectTask = nil
+        reconnectID = nil
         await attemptConnection(isReconnect: false)
     }
 
@@ -58,6 +60,7 @@ public actor VPNService {
         sessionGeneration &+= 1
         reconnectTask?.cancel()
         reconnectTask = nil
+        reconnectID = nil
 
         guard let process = ownedProcess, process.isRunning else {
             ownedProcess = nil
@@ -71,10 +74,9 @@ public actor VPNService {
         state = .disconnecting
         message = "Disconnecting…"
         lastError = nil
-        process.signalGroup(SIGTERM)
+        process.closeControlChannel()
         if !(await waitForExit(process, seconds: 5)) {
-            process.signalGroup(SIGKILL)
-            _ = await waitForExit(process, seconds: 2)
+            _ = await waitForExit(process, seconds: 3)
         }
 
         if process.isRunning {
@@ -97,17 +99,29 @@ public actor VPNService {
         }
     }
 
-    public func shutdown() async {
+    public func shutdown() async -> Bool {
         desiredConnected = false
+        sessionGeneration &+= 1
         reconnectTask?.cancel()
         reconnectTask = nil
+        reconnectID = nil
         if let process = ownedProcess, process.isRunning {
-            process.signalGroup(SIGTERM)
+            process.closeControlChannel()
             if !(await waitForExit(process, seconds: 5)) {
-                process.signalGroup(SIGKILL)
-                _ = await waitForExit(process, seconds: 2)
+                _ = await waitForExit(process, seconds: 3)
             }
         }
+        guard !isOwnedProcessRunning() else {
+            state = .disconnecting
+            message = "Shutdown failed"
+            lastError = "The privileged VPN supervisor did not confirm tunnel cleanup."
+            return false
+        }
+        ownedProcess = nil
+        connectInFlight = false
+        state = .disconnected
+        message = "Disconnected"
+        return true
     }
 
     // MARK: - Config helpers
@@ -143,17 +157,14 @@ public actor VPNService {
     // MARK: - Connection lifecycle
 
     private func attemptConnection(isReconnect: Bool) async {
-        if isOwnedProcessRunning() {
-            state = .connected
-            message = "Connected"
-            lastError = nil
-            return
-        }
         if connectInFlight {
             let generation = sessionGeneration
             while connectInFlight, generation == sessionGeneration {
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
+            return
+        }
+        if isOwnedProcessRunning() {
             return
         }
 
@@ -173,7 +184,7 @@ public actor VPNService {
             return
         }
 
-        sessionGeneration &+= 1
+        if !isReconnect { sessionGeneration &+= 1 }
         let generation = sessionGeneration
         connectInFlight = true
         currentAttemptIsReconnect = isReconnect
@@ -204,20 +215,20 @@ public actor VPNService {
             try process.start()
             ownedProcess = process
 
-            // Foreground openconnect remains alive after authentication. Prefer
-            // its explicit success messages, with a stable-process fallback for
-            // Fortinet builds whose wording differs.
+            // The routing script emits this only after interface, routes, and
+            // scoped DNS setup complete. OpenConnect authentication text alone
+            // is not sufficient to report a usable tunnel.
             let started = Date()
             while Date().timeIntervalSince(started) < 12 {
                 guard desiredConnected, generation == sessionGeneration else {
-                    process.signalGroup(SIGTERM)
+                    process.closeControlChannel()
                     return
                 }
                 guard process.isRunning else {
                     try? await Task.sleep(nanoseconds: 100_000_000)
                     return
                 }
-                if outputShowsConnected(process.output) || Date().timeIntervalSince(started) >= 5 {
+                if outputShowsConnected(process.output) {
                     state = .connected
                     message = "Connected"
                     lastError = nil
@@ -225,6 +236,12 @@ public actor VPNService {
                     return
                 }
                 try await Task.sleep(nanoseconds: 250_000_000)
+            }
+            process.closeControlChannel()
+            _ = await waitForExit(process, seconds: 8)
+            if generation == sessionGeneration {
+                fail("VPN connection timed out before tunnel setup completed.")
+                if !isReconnect { desiredConnected = false }
             }
         } catch {
             if generation == sessionGeneration {
@@ -265,6 +282,8 @@ public actor VPNService {
     private func scheduleReconnect() {
         guard desiredConnected, reconnectTask == nil else { return }
         let generation = sessionGeneration
+        let reconnectID = UUID()
+        self.reconnectID = reconnectID
         reconnectTask = Task { [weak self] in
             var delay: UInt64 = 1
             while !Task.isCancelled {
@@ -276,16 +295,18 @@ public actor VPNService {
                 if await self.isOwnedProcessRunning() { break }
                 delay = min(delay * 2, 30)
             }
-            await self?.reconnectLoopFinished()
+            await self?.reconnectLoopFinished(id: reconnectID)
         }
     }
 
     private func reconnectIsAllowed(generation: UInt64) -> Bool {
-        desiredConnected && generation <= sessionGeneration && !isOwnedProcessRunning()
+        desiredConnected && generation == sessionGeneration && !isOwnedProcessRunning()
     }
 
-    private func reconnectLoopFinished() {
+    private func reconnectLoopFinished(id: UUID) {
+        guard reconnectID == id else { return }
         reconnectTask = nil
+        reconnectID = nil
     }
 
     private func waitForExit(_ process: OwnedVPNProcess, seconds: TimeInterval) async -> Bool {
@@ -326,10 +347,7 @@ public actor VPNService {
     }
 
     private func outputShowsConnected(_ output: String) -> Bool {
-        let lower = output.lowercased()
-        return ["connected as ", "session established", "tunnel is up", "configured as "].contains {
-            lower.contains($0)
-        }
+        output.localizedCaseInsensitiveContains("uoa-proxy: tunnel ready")
     }
 
     private func isAuthenticationFailure(_ output: String) -> Bool {
@@ -424,17 +442,10 @@ private final class OwnedVPNProcess: @unchecked Sendable {
         }
         try process.run()
         stdin.fileHandleForWriting.write(Data(standardInput.utf8))
-        try? stdin.fileHandleForWriting.close()
     }
 
-    func signalGroup(_ signal: Int32) {
-        let pid = process.processIdentifier
-        guard pid > 0 else { return }
-        // The supervisor calls setsid before execing sudo. If disconnect wins
-        // that startup race, signal the still-exact supervisor PID instead.
-        if kill(-pid, signal) != 0, errno == ESRCH {
-            _ = kill(pid, signal)
-        }
+    func closeControlChannel() {
+        try? stdin.fileHandleForWriting.close()
     }
 
     private func sanitize(_ value: String) -> String {

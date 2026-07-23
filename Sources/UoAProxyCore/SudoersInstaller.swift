@@ -52,6 +52,7 @@ public enum SudoersInstaller {
         try runSudo("/bin/cp", arguments: [helperSource, "\(stagedRuntime)/uoa-proxy-helper"])
         try runSudo("/usr/sbin/chown", arguments: ["-R", "root:wheel", stagedRuntime])
         try runSudo("/bin/chmod", arguments: ["-R", "go-w", stagedRuntime])
+        try runSudo("/bin/chmod", arguments: ["700", stagedRuntime])
         try runSudo("/bin/chmod", arguments: ["755", "\(stagedRuntime)/uoa-proxy-helper"])
         guard try digestInstallSources(
             helper: "\(stagedRuntime)/uoa-proxy-helper",
@@ -129,6 +130,11 @@ public enum SudoersInstaller {
         var files = [(name: "helper", path: helper)]
         while let url = enumerator.nextObject() as? URL {
             let relative = String(url.path.dropFirst(root.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            var info = stat()
+            guard lstat(url.path, &info) == 0 else {
+                throw VPNError.connectFailed("Cannot inspect install source: \(url.path)")
+            }
+            if (info.st_mode & S_IFMT) == S_IFDIR { continue }
             files.append((name: "runtime/\(relative)", path: url.path))
         }
         files.sort { $0.name < $1.name }

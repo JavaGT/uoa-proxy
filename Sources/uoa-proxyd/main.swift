@@ -72,7 +72,10 @@ enum UoAProxyD {
             let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .global())
             source.setEventHandler {
                 Task {
-                    await service.shutdown()
+                    guard await service.shutdown() else {
+                        appendDaemonLog("shutdown refused: owned VPN supervisor still running")
+                        return
+                    }
                     UnixSocket.removeSocketFile(at: AppPaths.socketURL.path)
                     DaemonOwnership.release()
                     appendDaemonLog("uoa-proxyd stopped by signal pid=\(getpid())")
@@ -241,7 +244,7 @@ enum UoAProxyD {
             let encoded = try JSONEncoder().encode(response)
             guard let out = String(data: encoded, encoding: .utf8) else { return }
             try UnixSocket.writeLine(fd, out)
-            if request.cmd == .shutdown {
+            if request.cmd == .shutdown, response.ok {
                 DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) {
                     _ = kill(getpid(), SIGTERM)
                 }
@@ -314,13 +317,14 @@ enum UoAProxyD {
             ), snap: snap)
 
         case .shutdown:
-            await service.shutdown()
+            let stopped = await service.shutdown()
             let snap = await service.snapshot()
             return fill(IPCResponse(
                 id: request.id,
-                ok: true,
+                ok: stopped,
                 state: snap.state,
-                message: "Shutting down"
+                message: stopped ? "Shutting down" : snap.message,
+                error: stopped ? nil : snap.error
             ), snap: snap)
 
         case .setConfig:

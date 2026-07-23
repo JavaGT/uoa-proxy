@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -19,17 +21,24 @@ jobs:
           - arch: arm64
             runner: macos-14
           - arch: x86_64
-            runner: macos-13
+            runner: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
         run: brew install openconnect
       - name: Build release archive
-        run: Scripts/package-release.sh "${GITHUB_REF_NAME#v}"
+        run: Scripts/package-release.sh "${GITHUB_REF_NAME#v}" "${{ matrix.arch }}"
+      - name: Test package contracts
+        run: swift run uoa-proxy-contract-tests && Tests/test-packaging.sh
       - uses: actions/upload-artifact@v4
         with:
           name: uoa-proxy-${{ matrix.arch }}
-          path: release/*.tar.gz
+          path: |
+            release/*.tar.gz
+            release/*.sha256
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release/*.tar.gz
 
   publish:
     needs: build
@@ -42,4 +51,4 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/*.tar.gz --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.sha256 --generate-notes

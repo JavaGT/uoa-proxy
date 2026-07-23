@@ -3,6 +3,7 @@ set -euo pipefail
 
 SOURCE="${1:-}"
 DEST="${2:-}"
+SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [[ ! -x "$SOURCE" || -z "$DEST" ]]; then
   echo "usage: $0 /path/to/openconnect destination" >&2
   exit 64
@@ -75,14 +76,32 @@ if [[ -z "$script" ]]; then
   exit 1
 fi
 cp "$script" "$DEST/vpnc-script"
-# Homebrew's generic script persists VPN DNS on the active network service via
-# `networksetup`. If OpenConnect is killed before its disconnect callback,
-# that leaves unreachable University resolvers as the Mac's only DNS servers.
-# The script's scutil resolver is dynamic, so retain it and remove only the
-# persistent Wi-Fi override and its corresponding reset.
-sed -i '' '/^[[:space:]]*networksetup -setdnsservers "\$ACTIVE_NETWORK_SERVICE" \$INTERNAL_IP4_DNS$/d' "$DEST/vpnc-script"
-sed -i '' '/^[[:space:]]*networksetup -setdnsservers "\$ACTIVE_NETWORK_SERVICE" Empty$/d' "$DEST/vpnc-script"
+# The override below bypasses the generic functions. Remove their direct
+# networksetup calls as defense in depth without rewriting upstream control
+# flow, which varies between vpnc-script releases.
+sed -i '' '/^[[:space:]]*networksetup -setdnsservers/d' "$DEST/vpnc-script"
+# Override the generic Darwin resolver functions before do_connect is defined.
+# The packaged implementation creates only a tunnel-scoped dynamic resolver;
+# it never mutates the active physical network service.
+dns_fragment="$SOURCE_DIR/vpnc-darwin-dns.sh"
+awk -v fragment="$dns_fragment" '
+  /^do_connect\(\) \{/ && !inserted {
+    while ((getline line < fragment) > 0) print line
+    close(fragment)
+    inserted = 1
+  }
+  { print }
+' "$DEST/vpnc-script" > "$DEST/vpnc-script.patched"
+mv "$DEST/vpnc-script.patched" "$DEST/vpnc-script"
+awk '
+  { print }
+  /^[[:space:]]*do_connect[[:space:]]*$/ { print "\t\techo \"uoa-proxy: tunnel ready\"" }
+' "$DEST/vpnc-script" > "$DEST/vpnc-script.patched"
+mv "$DEST/vpnc-script.patched" "$DEST/vpnc-script"
+grep -q 'MODIFYRESOLVCONF=modify_resolvconf_uoa_darwin' "$DEST/vpnc-script"
+grep -q 'uoa-proxy: tunnel ready' "$DEST/vpnc-script"
 ! grep -q 'networksetup -setdnsservers' "$DEST/vpnc-script"
+sh -n "$DEST/vpnc-script"
 chmod 755 "$DEST/bin/openconnect" "$DEST/vpnc-script"
 
 echo "Bundled openconnect and $((${#seen[@]} - 1)) libraries in $DEST"

@@ -41,6 +41,11 @@ let package = Package(
             name: "UoAProxy",
             dependencies: ["UoAProxyCore"],
             path: "Sources/UoAProxy"
+        ),
+        .executableTarget(
+            name: "uoa-proxy-contract-tests",
+            dependencies: ["UoAProxyCore"],
+            path: "Tests/ContractTests"
         )
     ]
 )

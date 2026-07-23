@@ -25,6 +25,19 @@ if [[ ! -x "$DIST/bin/uoa-proxyd" || ! -x "$DIST/bin/uoa-proxy" \
   "$ROOT/Scripts/build.sh"
 fi
 
+# Stop the old daemon before replacing any executable it may be running. A
+# failed graceful stop is fatal; installing a mixed-version runtime is unsafe.
+if [[ -S "$HOME/Library/Application Support/UoAProxy/control.sock" ]]; then
+  stopped=false
+  for existing_cli in "$BIN_DIR/uoa-proxy" /opt/homebrew/bin/uoa-proxy /usr/local/bin/uoa-proxy "$HOME/.local/bin/uoa-proxy"; do
+    if [[ -x "$existing_cli" ]] && "$existing_cli" daemon stop; then
+      stopped=true
+      break
+    fi
+  done
+  $stopped || { echo "error: existing daemon did not stop cleanly" >&2; exit 1; }
+fi
+
 echo "→ Installing CLI + daemon to $BIN_DIR"
 cp "$DIST/bin/uoa-proxyd" "$BIN_DIR/uoa-proxyd"
 cp "$DIST/bin/uoa-proxy" "$BIN_DIR/uoa-proxy"
@@ -81,10 +94,8 @@ if [[ "$manager" == "Aqua" ]]; then
   echo "→ Starting LaunchAgent (Aqua session)…"
   uid="$(id -u)"
   launchctl bootout "gui/${uid}/${LAUNCH_AGENT_LABEL}" 2>/dev/null || true
-  launchctl bootstrap "gui/${uid}" "$LAUNCH_AGENT_PLIST" 2>/dev/null \
-    || launchctl load "$LAUNCH_AGENT_PLIST" 2>/dev/null \
-    || true
-  launchctl kickstart -k "gui/${uid}/${LAUNCH_AGENT_LABEL}" 2>/dev/null || true
+  launchctl bootstrap "gui/${uid}" "$LAUNCH_AGENT_PLIST"
+  launchctl kickstart "gui/${uid}/${LAUNCH_AGENT_LABEL}"
 else
   echo "→ Non-Aqua session (SSH?) — starting uoa-proxyd --daemonize"
   "$BIN_DIR/uoa-proxy" daemon stop 2>/dev/null || true
@@ -102,10 +113,11 @@ done
 
 if [[ -S "$SOCK" ]]; then
   echo "→ Daemon is up ($SOCK)"
-  "$BIN_DIR/uoa-proxy" daemon status || true
+  "$BIN_DIR/uoa-proxy" daemon status
 else
   echo "warning: control socket not found yet at $SOCK" >&2
   echo "  Try: $BIN_DIR/uoa-proxy daemon start" >&2
+  exit 1
 fi
 
 # PATH hint
