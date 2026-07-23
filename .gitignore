@@ -1,0 +1,8 @@
+.build/
+dist/
+.swiftpm/
+*.xcodeproj
+xcuserdata/
+.DS_Store
+reviews/
+.opencode/
