@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import Foundation
 
 /// Installs the fixed privileged runner and a single-command sudoers rule.
@@ -15,8 +16,12 @@ public enum SudoersInstaller {
             throw VPNError.connectFailed("uoa-proxy-helper is not installed. Run ./Scripts/install.sh first.")
         }
         guard let runtimeSource = AppPaths.resolveOpenconnectRuntimeSource() else {
-            throw VPNError.connectFailed("Bundled openconnect runtime is missing. Run ./Scripts/build.sh and ./Scripts/install.sh.")
+            throw VPNError.connectFailed("Bundled openconnect runtime is missing from this uoa-proxy installation.")
         }
+        let sourceDigest = try digestInstallSources(helper: helperSource, runtime: runtimeSource)
+
+        // Never replace the runtime underneath a daemon that may own a tunnel.
+        try DaemonLifecycle.stopDaemon()
 
         let contents = """
         # UoA Proxy - fixed, validating privileged VPN runner only
@@ -24,33 +29,45 @@ public enum SudoersInstaller {
         \(user) ALL=(root) NOPASSWD: \(AppPaths.privilegedHelperPath)
 
         """
-        let temp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("uoa-proxy-sudoers-\(UUID().uuidString)")
-        try contents.write(to: temp, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o440], ofItemAtPath: temp.path)
-        defer { try? FileManager.default.removeItem(at: temp) }
-
-        try run("/usr/sbin/visudo", arguments: ["-cf", temp.path])
-
         fputs("Mac password for \(user) (sudo) - input is hidden:\n", stderr)
         let password = try SecureInput.readSecret(prompt: "Password: ")
         guard !password.isEmpty else { throw VPNError.connectFailed("Empty password - cancelled.") }
         defer { invalidateCredentialCache() }
 
         let destination = AppPaths.privilegedRuntimeDirectory
-        try runSudo("/bin/mkdir", arguments: ["-p", destination], password: password)
-        // Secure any existing tree before updating it, then enforce the same
-        // ownership and mode again after all files have been copied.
-        try runSudo("/usr/sbin/chown", arguments: ["-R", "root:wheel", destination])
-        try runSudo("/bin/chmod", arguments: ["-R", "go-w", destination])
-        try runSudo("/usr/bin/ditto", arguments: [runtimeSource, "\(destination)/openconnect"])
-        try runSudo("/bin/cp", arguments: [helperSource, AppPaths.privilegedHelperPath])
-        try runSudo("/usr/sbin/chown", arguments: ["-R", "root:wheel", destination])
-        try runSudo("/bin/chmod", arguments: ["-R", "go-w", destination])
-        try runSudo("/bin/chmod", arguments: ["755", AppPaths.privilegedHelperPath])
-        try runSudo("/bin/cp", arguments: [temp.path, "/etc/sudoers.d/uoa-proxy"])
-        try runSudo("/usr/sbin/chown", arguments: ["root:wheel", "/etc/sudoers.d/uoa-proxy"])
-        try runSudo("/bin/chmod", arguments: ["440", "/etc/sudoers.d/uoa-proxy"])
+        let installID = UUID().uuidString
+        let stagedRuntime = "/Library/PrivilegedHelperTools/.uoa-proxy-\(installID)"
+        let stagedSudoers = "/etc/sudoers.d/.uoa-proxy-\(installID)"
+        defer {
+            try? runSudo("/bin/rm", arguments: ["-rf", stagedRuntime])
+            try? runSudo("/bin/rm", arguments: ["-f", stagedSudoers])
+        }
+
+        // Authenticate once, then create and validate sudoers content entirely
+        // under the root-only destination directory. No user-writable pathname
+        // is reused after visudo validates it.
+        try runSudo("/usr/bin/true", arguments: [], password: password)
+        try runSudo("/bin/mkdir", arguments: ["-m", "700", stagedRuntime])
+        try runSudo("/usr/bin/ditto", arguments: [runtimeSource, "\(stagedRuntime)/openconnect"])
+        try runSudo("/bin/cp", arguments: [helperSource, "\(stagedRuntime)/uoa-proxy-helper"])
+        try runSudo("/usr/sbin/chown", arguments: ["-R", "root:wheel", stagedRuntime])
+        try runSudo("/bin/chmod", arguments: ["-R", "go-w", stagedRuntime])
+        try runSudo("/bin/chmod", arguments: ["755", "\(stagedRuntime)/uoa-proxy-helper"])
+        guard try digestInstallSources(
+            helper: "\(stagedRuntime)/uoa-proxy-helper",
+            runtime: "\(stagedRuntime)/openconnect"
+        ) == sourceDigest,
+        try digestInstallSources(helper: helperSource, runtime: runtimeSource) == sourceDigest else {
+            throw VPNError.connectFailed("uoa-proxy installation artifacts changed while they were being installed.")
+        }
+        try runSudo("/usr/bin/tee", arguments: [stagedSudoers], input: Data(contents.utf8))
+        try runSudo("/usr/sbin/chown", arguments: ["root:wheel", stagedSudoers])
+        try runSudo("/bin/chmod", arguments: ["440", stagedSudoers])
+        try runSudo("/usr/sbin/visudo", arguments: ["-cf", stagedSudoers])
+
+        try runSudo("/bin/rm", arguments: ["-rf", destination])
+        try runSudo("/bin/mv", arguments: [stagedRuntime, destination])
+        try runSudo("/bin/mv", arguments: ["-f", stagedSudoers, "/etc/sudoers.d/uoa-proxy"])
 
         guard isPasswordlessSudoAvailable() else {
             throw VPNError.connectFailed(
@@ -98,23 +115,43 @@ public enum SudoersInstaller {
         process.waitUntilExit()
     }
 
-    private static func run(_ executable: String, arguments: [String]) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.standardOutput = FileHandle.standardOutput
-        process.standardError = FileHandle.standardError
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw VPNError.connectFailed("\(executable) failed (exit \(process.terminationStatus)).")
+    private static func digestInstallSources(helper: String, runtime: String) throws -> SHA256.Digest {
+        let manager = FileManager.default
+        let root = URL(fileURLWithPath: runtime, isDirectory: true)
+        guard let enumerator = manager.enumerator(
+            at: root,
+            includingPropertiesForKeys: nil,
+            options: [],
+            errorHandler: { _, _ in false }
+        ) else {
+            throw VPNError.connectFailed("Cannot inspect the bundled OpenConnect runtime.")
         }
+        var files = [(name: "helper", path: helper)]
+        while let url = enumerator.nextObject() as? URL {
+            let relative = String(url.path.dropFirst(root.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            files.append((name: "runtime/\(relative)", path: url.path))
+        }
+        files.sort { $0.name < $1.name }
+
+        var digest = SHA256()
+        for file in files {
+            var info = stat()
+            guard lstat(file.path, &info) == 0,
+                  (info.st_mode & S_IFMT) == S_IFREG,
+                  (info.st_mode & 0o022) == 0 else {
+                throw VPNError.connectFailed("Install source must contain only non-writable regular files: \(file.path)")
+            }
+            digest.update(data: Data(file.name.utf8))
+            digest.update(data: try Data(contentsOf: URL(fileURLWithPath: file.path), options: .mappedIfSafe))
+        }
+        return digest.finalize()
     }
 
     private static func runSudo(
         _ executable: String,
         arguments: [String],
-        password: String? = nil
+        password: String? = nil,
+        input data: Data? = nil
     ) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
@@ -122,12 +159,15 @@ public enum SudoersInstaller {
             ? ["-n", executable] + arguments
             : ["-S", "-p", "", executable] + arguments
         let input = Pipe()
-        if password != nil { process.standardInput = input }
-        process.standardOutput = FileHandle.standardOutput
+        if password != nil || data != nil { process.standardInput = input }
+        process.standardOutput = executable == "/usr/bin/tee" ? FileHandle.nullDevice : FileHandle.standardOutput
         process.standardError = FileHandle.standardError
         try process.run()
         if let password {
             input.fileHandleForWriting.write(Data("\(password)\n".utf8))
+            try? input.fileHandleForWriting.close()
+        } else if let data {
+            input.fileHandleForWriting.write(data)
             try? input.fileHandleForWriting.close()
         }
         process.waitUntilExit()

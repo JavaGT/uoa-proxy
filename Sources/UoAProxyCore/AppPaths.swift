@@ -70,25 +70,6 @@ public enum AppPaths {
         ]
     }
 
-    public static var helperSourceSearchPaths: [String] {
-        [
-            "/usr/local/bin/uoa-proxy-helper",
-            "/opt/homebrew/bin/uoa-proxy-helper",
-            "\(NSHomeDirectory())/.local/bin/uoa-proxy-helper"
-        ]
-    }
-
-    public static var openconnectRuntimeSourceSearchPaths: [String] {
-        [
-            "/usr/local/share/uoa-proxy/openconnect",
-            "/usr/local/opt/uoa-proxy/share/uoa-proxy/openconnect",
-            "/opt/homebrew/opt/uoa-proxy/share/uoa-proxy/openconnect",
-            "\(NSHomeDirectory())/.local/share/uoa-proxy/openconnect",
-            "\(NSHomeDirectory())/Applications/UoA Proxy.app/Contents/Resources/openconnect",
-            "/Applications/UoA Proxy.app/Contents/Resources/openconnect"
-        ]
-    }
-
     /// Menu bar app bundle search order (first existing wins).
     public static var menuBarAppSearchPaths: [String] {
         [
@@ -113,17 +94,32 @@ public enum AppPaths {
     }
 
     public static func resolveHelperSource() -> String? {
-        helperSourceSearchPaths.first {
-            FileManager.default.isExecutableFile(atPath: $0)
-        }
+        guard let prefix = currentInstallPrefix() else { return nil }
+        let path = "\(prefix)/bin/uoa-proxy-helper"
+        return FileManager.default.isExecutableFile(atPath: path) ? path : nil
     }
 
     public static func resolveOpenconnectRuntimeSource() -> String? {
-        openconnectRuntimeSourceSearchPaths.first {
-            var isDirectory: ObjCBool = false
-            return FileManager.default.fileExists(atPath: $0, isDirectory: &isDirectory)
-                && isDirectory.boolValue
+        guard let prefix = currentInstallPrefix() else { return nil }
+        let path = "\(prefix)/share/uoa-proxy/openconnect"
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+            && isDirectory.boolValue ? path : nil
+    }
+
+    /// Resolve companion artifacts from the same installation as this process.
+    /// This prevents a stale /usr/local install from being mixed with Homebrew.
+    private static func currentInstallPrefix() -> String? {
+        var size: UInt32 = 0
+        _ = _NSGetExecutablePath(nil, &size)
+        var buffer = [CChar](repeating: 0, count: Int(size))
+        guard _NSGetExecutablePath(&buffer, &size) == 0 else { return nil }
+        let executable = URL(fileURLWithPath: String(cString: buffer))
+            .resolvingSymlinksInPath()
+        guard executable.deletingLastPathComponent().lastPathComponent == "bin" else {
+            return nil
         }
+        return executable.deletingLastPathComponent().deletingLastPathComponent().path
     }
 
     /// Path to `UoA Proxy.app` if installed.
