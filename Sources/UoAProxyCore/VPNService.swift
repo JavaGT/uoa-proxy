@@ -196,7 +196,10 @@ public actor VPNService {
                 standardInput: "\(inputs.password)\n\(otp)\n",
                 redactions: [inputs.password, otp]
             ) { [weak self] id, status, output in
-                Task { await self?.ownedProcessExited(id: id, status: status, output: output) }
+                let service = self
+                Task {
+                    await service?.ownedProcessExited(id: id, status: status, output: output)
+                }
             }
             try process.start()
             ownedProcess = process
