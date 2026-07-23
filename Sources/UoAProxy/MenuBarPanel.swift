@@ -4,7 +4,6 @@ import UoAProxyCore
 
 struct MenuBarPanel: View {
     @EnvironmentObject private var vpn: VPNManager
-    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -147,7 +146,11 @@ struct MenuBarPanel: View {
         VStack(spacing: 8) {
             HStack {
                 Button("Settings…") {
-                    openSettings()
+                    NSApp.sendAction(
+                        Selector(("showSettingsWindow:")),
+                        to: nil,
+                        from: nil
+                    )
                     NSApp.activate(ignoringOtherApps: true)
                 }
                 .buttonStyle(.borderless)

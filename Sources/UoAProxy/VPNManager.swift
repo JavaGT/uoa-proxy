@@ -48,8 +48,9 @@ final class VPNManager: ObservableObject {
 
     private func startTimers() {
         otpTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            let manager = self
             Task { @MainActor in
-                self?.tickOTPLocal()
+                manager?.tickOTPLocal()
             }
         }
         // Single serial poll loop — never overlaps status calls.
