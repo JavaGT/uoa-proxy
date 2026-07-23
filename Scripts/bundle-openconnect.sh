@@ -75,6 +75,14 @@ if [[ -z "$script" ]]; then
   exit 1
 fi
 cp "$script" "$DEST/vpnc-script"
+# Homebrew's generic script persists VPN DNS on the active network service via
+# `networksetup`. If OpenConnect is killed before its disconnect callback,
+# that leaves unreachable University resolvers as the Mac's only DNS servers.
+# The script's scutil resolver is dynamic, so retain it and remove only the
+# persistent Wi-Fi override and its corresponding reset.
+sed -i '' '/^[[:space:]]*networksetup -setdnsservers "\$ACTIVE_NETWORK_SERVICE" \$INTERNAL_IP4_DNS$/d' "$DEST/vpnc-script"
+sed -i '' '/^[[:space:]]*networksetup -setdnsservers "\$ACTIVE_NETWORK_SERVICE" Empty$/d' "$DEST/vpnc-script"
+! grep -q 'networksetup -setdnsservers' "$DEST/vpnc-script"
 chmod 755 "$DEST/bin/openconnect" "$DEST/vpnc-script"
 
 echo "Bundled openconnect and $((${#seen[@]} - 1)) libraries in $DEST"

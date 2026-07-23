@@ -126,6 +126,10 @@ The daemon starts one foreground OpenConnect process and owns that exact process
 
 The app packages OpenConnect, its non-system libraries, and `vpnc-script`. A validating root-owned helper permits only the Fortinet protocol, the University gateway, the configured username, and the packaged routing script. Password and TOTP are supplied over standard input and are redacted from logs. The sudoers rule grants only this helper—not arbitrary OpenConnect arguments or kill commands.
 
+The packaged routing script applies VPN DNS dynamically; it does not persist
+University DNS servers as the Mac's Wi-Fi DNS configuration. This avoids a
+stale VPN teardown breaking public DNS after an interrupted connection.
+
 This remains a kernel split-tunnel VPN: the gateway-provided University routes and DNS are installed on a `utun` interface, while unrelated traffic keeps its normal route.
 
 ## Research drive (SMB)
