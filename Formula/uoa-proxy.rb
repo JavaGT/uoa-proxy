@@ -6,7 +6,6 @@ class UoaProxy < Formula
   license "MIT"
 
   depends_on macos: :sonoma
-  depends_on xcode: ["14.3", :build]
   depends_on "openconnect" => :build
 
   def install
