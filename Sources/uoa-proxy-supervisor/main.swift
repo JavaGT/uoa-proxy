@@ -16,13 +16,8 @@ guard forwarded.count == 5,
     fail("invalid command")
 }
 
-// The daemon owns this new session by its exact process-group ID. Disconnect
-// can therefore signal only this attempt, including sudo and openconnect,
-// without trusting a PID file or searching the global process table.
-guard setsid() >= 0 else {
-    fail("setsid failed: \(String(cString: strerror(errno)))")
-}
-
+// The privileged helper owns the OpenConnect process group and watches the
+// daemon's stdin pipe for EOF. It performs cleanup without a PID lookup.
 let arguments = ["/usr/bin/sudo", "-n", helperPath] + forwarded
 let argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) } + [nil]
 var mutableArgv = argv

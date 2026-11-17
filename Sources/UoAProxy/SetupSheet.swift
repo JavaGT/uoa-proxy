@@ -15,6 +15,8 @@ struct SetupSheet: View {
     @State private var busy = false
     @State private var errorText: String?
     @State private var connectAfterSave = true
+    @State private var showHelperInstall = false
+    @State private var connectWhenHelperInstalled = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -70,22 +72,12 @@ struct SetupSheet: View {
 
                 if !vpn.sudoOK {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Passwordless sudo required")
+                        Text("VPN helper required")
                             .font(.subheadline.weight(.medium))
-                        Text("openconnect needs root. In Terminal (works over SSH):")
+                        Text("Install the restricted helper to configure the VPN connection.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text("uoa-proxy install-sudo")
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                            .padding(6)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(nsColor: .controlBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                        Button("Copy command") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString("uoa-proxy install-sudo", forType: .string)
-                        }
+                        Button("Install VPN helper…") { showHelperInstall = true }
                         .buttonStyle(.borderless)
                         .font(.caption)
                     }
@@ -104,9 +96,10 @@ struct SetupSheet: View {
             HStack {
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
+                    .disabled(busy)
                 Spacer()
                 Button(busy ? "Saving…" : (connectAfterSave ? "Save & Connect" : "Save")) {
-                    save()
+                    Task { await save() }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(busy || !canSave)
@@ -115,6 +108,17 @@ struct SetupSheet: View {
         }
         .padding(20)
         .frame(width: 420)
+        .sheet(isPresented: $showHelperInstall, onDismiss: {
+            if connectWhenHelperInstalled && vpn.sudoOK {
+                connectWhenHelperInstalled = false
+                dismiss()
+                vpn.connect()
+            } else {
+                connectWhenHelperInstalled = false
+            }
+        }) {
+            HelperInstallSheet().environmentObject(vpn)
+        }
         .onAppear {
             username = vpn.config.username
         }
@@ -136,8 +140,9 @@ struct SetupSheet: View {
         }
     }
 
-    private func save() {
+    private func save() async {
         busy = true
+        defer { busy = false }
         errorText = nil
         vpn.config.username = username.trimmingCharacters(in: .whitespacesAndNewlines)
         if !password.isEmpty {
@@ -146,23 +151,20 @@ struct SetupSheet: View {
         if !totpSecret.isEmpty {
             vpn.totpSecret = totpSecret
         }
-        vpn.saveSettings()
-        // saveSettings is sync and updates has* flags
-        busy = false
-        if let err = vpn.lastError, !err.isEmpty, vpn.statusMessage != "Settings saved" {
-            errorText = err
+        guard await vpn.saveSettings() else {
+            errorText = vpn.lastError ?? "Could not save settings. Try again."
             return
         }
-        // Refresh to confirm
-        vpn.refreshFromDaemon()
+        password = ""
+        totpSecret = ""
         if !vpn.hasPassword || !vpn.hasTOTPSecret || vpn.config.username.isEmpty {
             errorText = "Still missing fields — check password / TOTP secret."
             return
         }
         if connectAfterSave {
             if !vpn.sudoOK {
-                errorText = "Saved, but passwordless sudo is not configured yet.\nRun in Terminal: uoa-proxy install-sudo"
-                // Don't dismiss so they see the message; still allow dismiss
+                connectWhenHelperInstalled = true
+                showHelperInstall = true
                 return
             }
             dismiss()

@@ -19,8 +19,10 @@ grep -q "tr ',' ' '" "$script"
 
 # EOF on the daemon-owned control channel must terminate and reap the exact
 # supervised child promptly. The helper refuses this test mode when run as root.
-started="$(date +%s)"
 helper="$(cd "$ROOT" && swift build -c release --show-bin-path)/uoa-proxy-helper"
+supervisor="${helper%/*}/uoa-proxy-supervisor"
+swift "$ROOT/Tests/supervisor-launch.swift" "$supervisor"
+started="$(date +%s)"
 set +e
 "$helper" self-test-supervision </dev/null
 status="$?"

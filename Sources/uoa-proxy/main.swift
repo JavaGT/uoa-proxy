@@ -56,7 +56,11 @@ enum UoAProxyCLI {
             try cmdDaemon(args)
 
         case "install-sudo":
-            try cmdInstallSudo()
+            if args.isEmpty {
+                try cmdInstallSudo()
+            } else {
+                throw IPCError.commandFailed("Unexpected install-sudo arguments.")
+            }
 
         case "logs":
             try cmdLogs(args)

@@ -20,9 +20,6 @@ public enum SudoersInstaller {
         }
         let sourceDigest = try digestInstallSources(helper: helperSource, runtime: runtimeSource)
 
-        // Never replace the runtime underneath a daemon that may own a tunnel.
-        try DaemonLifecycle.stopDaemon()
-
         let contents = """
         # UoA Proxy - fixed, validating privileged VPN runner only
         # Managed by uoa-proxy
@@ -32,6 +29,9 @@ public enum SudoersInstaller {
         fputs("Mac password for \(user) (sudo) - input is hidden:\n", stderr)
         let password = try SecureInput.readSecret(prompt: "Password: ")
         guard !password.isEmpty else { throw VPNError.connectFailed("Empty password - cancelled.") }
+        guard !password.contains("\n"), !password.contains("\r"), !password.contains("\0") else {
+            throw VPNError.connectFailed("Mac password cannot contain a line break.")
+        }
         defer { invalidateCredentialCache() }
 
         let destination = AppPaths.privilegedRuntimeDirectory
@@ -46,14 +46,28 @@ public enum SudoersInstaller {
         // Authenticate once, then create and validate sudoers content entirely
         // under the root-only destination directory. No user-writable pathname
         // is reused after visudo validates it.
+        invalidateCredentialCache()
         try runSudo("/usr/bin/true", arguments: [], password: password)
-        try runSudo("/bin/mkdir", arguments: ["-m", "700", stagedRuntime])
+        // Authenticate before stopping a live connection, and never replace
+        // the runtime underneath a daemon that may own a tunnel.
+        try DaemonLifecycle.stopDaemon()
+        // Create the parent as well: a clean Mac has no PrivilegedHelperTools yet.
+        try runSudo("/bin/mkdir", arguments: ["-p", "-m", "700", stagedRuntime])
         try runSudo("/usr/bin/ditto", arguments: [runtimeSource, "\(stagedRuntime)/openconnect"])
         try runSudo("/bin/cp", arguments: [helperSource, "\(stagedRuntime)/uoa-proxy-helper"])
         try runSudo("/usr/sbin/chown", arguments: ["-R", "root:wheel", stagedRuntime])
+        // An inherited ACL can keep a group/other write grant visible in the
+        // effective mode even after `go-w`. Strip ACLs first, then force
+        // deterministic modes rather than trusting the source tree.
+        try runSudo("/bin/chmod", arguments: ["-R", "-N", stagedRuntime])
         try runSudo("/bin/chmod", arguments: ["-R", "go-w", stagedRuntime])
-        try runSudo("/bin/chmod", arguments: ["700", stagedRuntime])
-        try runSudo("/bin/chmod", arguments: ["755", "\(stagedRuntime)/uoa-proxy-helper"])
+        try runSudo("/bin/chmod", arguments: ["-R", "u+rwX", stagedRuntime])
+        // The unprivileged verifier and availability probe need traversal;
+        // the root-owned directory remains unwritable by other users.
+        try runSudo("/bin/chmod", arguments: [StagedInstallPermissions.stagedDirectory, stagedRuntime])
+        try runSudo("/bin/chmod", arguments: [StagedInstallPermissions.helper, "\(stagedRuntime)/uoa-proxy-helper"])
+        try runSudo("/bin/chmod", arguments: [StagedInstallPermissions.executable, "\(stagedRuntime)/openconnect/bin/openconnect"])
+        try runSudo("/bin/chmod", arguments: [StagedInstallPermissions.executable, "\(stagedRuntime)/openconnect/vpnc-script"])
         guard try digestInstallSources(
             helper: "\(stagedRuntime)/uoa-proxy-helper",
             runtime: "\(stagedRuntime)/openconnect"
@@ -70,6 +84,7 @@ public enum SudoersInstaller {
         try runSudo("/bin/mv", arguments: [stagedRuntime, destination])
         try runSudo("/bin/mv", arguments: ["-f", stagedSudoers, "/etc/sudoers.d/uoa-proxy"])
 
+        invalidateCredentialCache()
         guard isPasswordlessSudoAvailable() else {
             throw VPNError.connectFailed(
                 "Privileged runner was installed, but its passwordless probe failed. Check /etc/sudoers.d/uoa-proxy."
@@ -82,9 +97,6 @@ public enum SudoersInstaller {
         openconnectPath _: String = VPNConfig.load().openconnectPath,
         timeout: TimeInterval = 5
     ) -> Bool {
-        guard FileManager.default.isExecutableFile(atPath: AppPaths.privilegedHelperPath) else {
-            return false
-        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
         process.arguments = ["-n", AppPaths.privilegedHelperPath, "probe"]
@@ -142,10 +154,14 @@ public enum SudoersInstaller {
         var digest = SHA256()
         for file in files {
             var info = stat()
-            guard lstat(file.path, &info) == 0,
-                  (info.st_mode & S_IFMT) == S_IFREG,
-                  (info.st_mode & 0o022) == 0 else {
-                throw VPNError.connectFailed("Install source must contain only non-writable regular files: \(file.path)")
+            guard lstat(file.path, &info) == 0 else {
+                throw VPNError.connectFailed("Cannot inspect install source: \(file.path)")
+            }
+            guard StagedInstallPermissions.isSafe(info.st_mode) else {
+                let mode = String(format: "%o", info.st_mode & 0o7777)
+                throw VPNError.connectFailed(
+                    "Install source must be a regular file without group/other write: \(file.path) (mode \(mode))"
+                )
             }
             digest.update(data: Data(file.name.utf8))
             digest.update(data: try Data(contentsOf: URL(fileURLWithPath: file.path), options: .mappedIfSafe))

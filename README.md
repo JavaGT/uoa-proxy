@@ -112,6 +112,15 @@ uoa-proxy ui
 open "/Applications/UoA Proxy.app"
 ```
 
+For GUI-only setup, open the menu bar app, choose **Setup needed**, and enter
+your university credentials. Choose **Install VPN helper** to open the macOS
+administrator authorization dialog. macOS decides which authentication methods
+are available; the app does not receive your Mac password. Disconnect any active
+UoA Proxy connection before installing the helper.
+Setup opens when you choose it or try to connect; it does not open automatically,
+so the disconnected panel always provides access to **Quit menu bar app**.
+After the helper is installed, save the credentials and connect from the panel.
+
 The **daemon does not launch the UI** (it is headless and often started over SSH).  
 `uoa-proxy ui` starts the daemon if needed, then opens the app.
 

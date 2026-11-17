@@ -19,19 +19,15 @@ final class VPNManager: ObservableObject {
     @Published var sudoOK: Bool = false
     @Published var needsSetup: Bool = false
     @Published var showSetupSheet: Bool = false
+    @Published private(set) var operation: VPNOperation = .idle
+    var installingHelper: Bool { operation == .installingHelper }
 
     private var otpTimer: Timer?
     private var pollTask: Task<Void, Never>?
-    private var didAutoPresentSetup = false
     private var lastOTPFetchRemaining: Int = -1
 
-    /// Bumped on every user connect/disconnect so stale poll results are dropped.
+    /// Bumped when a user action starts so stale poll results are dropped.
     private var actionGeneration: UInt64 = 0
-    /// True while a user-driven connect IPC is outstanding.
-    private var connectInFlight = false
-    /// True while a user-driven disconnect IPC is outstanding.
-    private var disconnectInFlight = false
-    private var saveInFlight = false
     private var pollInFlight = false
 
     init() {
@@ -74,7 +70,7 @@ final class VPNManager: ObservableObject {
     private func refreshFromDaemonAsync() async {
         // Allow status during connect so the UI can track progress; skip only
         // when a poll is already running.
-        guard !pollInFlight else { return }
+        guard !pollInFlight, !installingHelper, operation != .saving else { return }
         pollInFlight = true
         let genAtStart = actionGeneration
         defer { pollInFlight = false }
@@ -90,10 +86,6 @@ final class VPNManager: ObservableObject {
             // — but daemon is source of truth once settled.
             apply(r, clearErrorsOnSettled: true)
             daemonConnected = true
-            if needsSetup && !didAutoPresentSetup && state == .disconnected {
-                didAutoPresentSetup = true
-                showSetupSheet = true
-            }
         case .failure(let error):
             daemonConnected = false
             lastError = error.localizedDescription
@@ -133,7 +125,10 @@ final class VPNManager: ObservableObject {
     }
 
     private func apply(_ r: IPCResponse, clearErrorsOnSettled: Bool = false) {
-        state = r.state
+        if !(operation == .connecting && r.state == .disconnected)
+            && !(operation == .disconnecting && (r.state == .connected || r.state == .connecting)) {
+            state = r.state
+        }
         statusMessage = r.message
         if let err = r.error, !err.isEmpty {
             lastError = err
@@ -167,7 +162,7 @@ final class VPNManager: ObservableObject {
 
     /// Whether the Connect/Disconnect control should be enabled.
     var canAct: Bool {
-        daemonConnected && !disconnectInFlight && !saveInFlight
+        daemonConnected && (operation == .idle || operation == .connecting)
     }
 
     /// Primary button label.
@@ -180,12 +175,12 @@ final class VPNManager: ObservableObject {
         }
     }
 
-    func saveSettings() {
-        guard !saveInFlight else { return }
-        saveInFlight = true
+    func saveSettings() async -> Bool {
+        guard operation.canBegin(.saving) else { return false }
+        operation = .saving
+        actionGeneration &+= 1
         statusMessage = "Saving…"
-        Task {
-            defer { saveInFlight = false }
+        defer { operation = .idle }
             let cfg = config
             let pass = password
             let totp = totpSecret
@@ -217,19 +212,22 @@ final class VPNManager: ObservableObject {
                 statusMessage = "Settings saved"
                 lastError = nil
                 daemonConnected = true
+                return true
             case .failure(let error):
                 lastError = error.localizedDescription
+                statusMessage = "Save failed"
+                return false
             }
-        }
     }
 
     func connect() {
+        guard operation.canBegin(.connecting) else { return }
         if credentialSetupIncomplete || !sudoOK {
             showSetupSheet = true
             if credentialSetupIncomplete {
                 lastError = "Finish setup to connect (username, password, TOTP)."
             } else if !sudoOK {
-                lastError = "Passwordless sudo is required. Run: uoa-proxy install-sudo"
+                lastError = "Install the VPN helper in setup to connect."
             }
             if credentialSetupIncomplete || !sudoOK {
                 return
@@ -237,24 +235,23 @@ final class VPNManager: ObservableObject {
         }
 
         // Don't start another connect while disconnecting or already connecting.
-        guard !connectInFlight, !disconnectInFlight else { return }
         guard state == .disconnected else { return }
 
         actionGeneration &+= 1
         let gen = actionGeneration
-        connectInFlight = true
+        operation = .connecting
         state = .connecting
         statusMessage = "Connecting…"
         lastError = nil
         Task {
             defer {
                 if gen == actionGeneration {
-                    connectInFlight = false
+                    operation = .idle
                 }
             }
             let result = await Self.ipc { try DaemonClient(autoStart: true).connect() }
             guard gen == actionGeneration else { return }
-            connectInFlight = false
+            operation = .idle
             switch result {
             case .success(let r):
                 apply(r)
@@ -274,27 +271,26 @@ final class VPNManager: ObservableObject {
     }
 
     /// Cancel an in-flight connect or drop an active tunnel.
-    /// Always allowed while connecting — must not be blocked by connectInFlight.
+    /// A disconnect supersedes an in-flight connect.
     func disconnect() {
-        guard !disconnectInFlight else { return }
+        guard operation.canBegin(.disconnecting) else { return }
 
         actionGeneration &+= 1
         let gen = actionGeneration
         // Supersede any outstanding connect result.
-        connectInFlight = false
-        disconnectInFlight = true
+        operation = .disconnecting
         state = .disconnecting
         statusMessage = "Disconnecting…"
         lastError = nil
         Task {
             defer {
                 if gen == actionGeneration {
-                    disconnectInFlight = false
+                    operation = .idle
                 }
             }
             let result = await Self.ipc { try DaemonClient(autoStart: true).disconnect() }
             guard gen == actionGeneration else { return }
-            disconnectInFlight = false
+            operation = .idle
             switch result {
             case .success(let r):
                 apply(r)
@@ -305,8 +301,8 @@ final class VPNManager: ObservableObject {
                 }
             case .failure(let error):
                 lastError = error.localizedDescription
-                // Force refresh even if another poll is running.
-                pollInFlight = false
+                // Let any stale poll finish before starting a fresh one.
+                while pollInFlight { try? await Task.sleep(nanoseconds: 100_000_000) }
                 await refreshFromDaemonAsync()
             }
         }
@@ -323,9 +319,21 @@ final class VPNManager: ObservableObject {
         }
     }
 
-    func installPasswordlessSudo() {
-        lastError = "Run in Terminal (works over SSH):\n  uoa-proxy install-sudo"
-        statusMessage = "See note for install-sudo"
+    func installHelper() async -> String? {
+        guard operation.canBegin(.installingHelper) else { return "Wait for the current operation to finish, then try again." }
+        guard state == .disconnected else { return "Disconnect before installing the VPN helper." }
+        operation = .installingHelper
+        actionGeneration &+= 1
+        while pollInFlight { try? await Task.sleep(nanoseconds: 100_000_000) }
+        let result = await Self.ipc { try NativeHelperInstaller.install() }
+        operation = .idle
+        await refreshFromDaemonAsync()
+        switch result {
+        case .success:
+            return sudoOK ? nil : "The helper was installed, but could not be verified. Try again."
+        case .failure(let error):
+            return error.localizedDescription
+        }
     }
 
     // MARK: - Background IPC

@@ -7,6 +7,7 @@ struct SettingsView: View {
     @State private var showSecret = false
     @State private var showPassword = false
     @State private var savedFlash = false
+    @State private var showHelperInstall = false
 
     var body: some View {
         Form {
@@ -107,13 +108,16 @@ struct SettingsView: View {
 
             Section {
                 Button("Save Settings") {
-                    vpn.saveSettings()
-                    savedFlash = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                        savedFlash = false
+                    Task {
+                        if await vpn.saveSettings() {
+                            savedFlash = true
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
+                            savedFlash = false
+                        }
                     }
                 }
                 .keyboardShortcut(.defaultAction)
+                .disabled(vpn.installingHelper)
 
                 if savedFlash {
                     Label("Saved via daemon", systemImage: "checkmark.circle.fill")
@@ -130,23 +134,24 @@ struct SettingsView: View {
             }
 
             Section {
-                Button("Install passwordless sudo…") {
-                    vpn.installPasswordlessSudo()
+                Button("Install VPN helper…") {
+                    showHelperInstall = true
                 }
             } header: {
                 Text("Privileges")
             } footer: {
                 Text(
                     """
-                    Required for connect over SSH (no GUI password dialog). In Terminal run:
-                    uoa-proxy install-sudo
-                    Remove later with: sudo rm /etc/sudoers.d/uoa-proxy
+                    The helper gives UoA Proxy restricted access to configure the VPN.
                     """
                 )
             }
         }
         .formStyle(.grouped)
         .frame(width: 500, height: 620)
+        .sheet(isPresented: $showHelperInstall) {
+            HelperInstallSheet().environmentObject(vpn)
+        }
         .onAppear {
             vpn.refreshFromDaemon()
         }

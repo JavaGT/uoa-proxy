@@ -48,7 +48,20 @@ chmod 755 "$BIN_DIR/uoa-proxyd" "$BIN_DIR/uoa-proxy" \
 
 SHARE_DIR="${BIN_DIR%/bin}/share/uoa-proxy"
 mkdir -p "$SHARE_DIR"
-cp -R "$DIST/openconnect" "$SHARE_DIR/"
+# The bundled libraries are read-only, so copying over an existing runtime
+# fails. Stage a complete replacement, preserving the previous copy for recovery.
+runtime_stage="$(mktemp -d "$SHARE_DIR/.runtime.XXXXXX")"
+cp -R "$DIST/openconnect" "$runtime_stage/openconnect"
+if [[ -e "$SHARE_DIR/openconnect" ]]; then
+  mv "$SHARE_DIR/openconnect" "$runtime_stage/previous"
+fi
+if ! mv "$runtime_stage/openconnect" "$SHARE_DIR/openconnect"; then
+  if [[ -e "$runtime_stage/previous" ]]; then
+    mv "$runtime_stage/previous" "$SHARE_DIR/openconnect"
+  fi
+  echo "error: could not install the bundled runtime" >&2
+  exit 1
+fi
 
 echo "→ Installing menu bar app to $APP_DST"
 rm -rf "$APP_DST"

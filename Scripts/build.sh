@@ -32,6 +32,8 @@ cp "$BIN_DIR/uoa-proxy" "$DIST/bin/"
 cp "$BIN_DIR/uoa-proxy-helper" "$DIST/bin/"
 cp "$BIN_DIR/uoa-proxy-supervisor" "$DIST/bin/"
 cp "$BIN_DIR/$APP_EXEC" "$MACOS_DIR/$APP_EXEC"
+mkdir -p "$CONTENTS/Resources/bin" "$CONTENTS/Resources/share/uoa-proxy"
+cp "$BIN_DIR/uoa-proxy-helper" "$CONTENTS/Resources/bin/"
 cp "$ROOT/Resources/Info.plist" "$CONTENTS/Info.plist"
 printf 'APPL????' > "$CONTENTS/PkgInfo"
 
@@ -41,7 +43,7 @@ if [[ -z "$OPENCONNECT_BIN" ]]; then
   exit 1
 fi
 "$ROOT/Scripts/bundle-openconnect.sh" "$OPENCONNECT_BIN" "$DIST/openconnect"
-cp -R "$DIST/openconnect" "$CONTENTS/Resources/openconnect"
+cp -R "$DIST/openconnect" "$CONTENTS/Resources/share/uoa-proxy/openconnect"
 
 if command -v codesign >/dev/null 2>&1; then
   codesign --force --deep --sign - "$APP_DIR" 2>/dev/null || true
